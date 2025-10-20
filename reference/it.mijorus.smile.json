@@ -1,0 +1,72 @@
+{
+    "id": "it.mijorus.smile",
+    "runtime": "org.gnome.Platform",
+    "runtime-version": "48",
+    "sdk": "org.gnome.Sdk",
+    "command": "smile",
+    "finish-args": [
+        "--share=ipc",
+        "--socket=wayland",
+        "--socket=fallback-x11",
+        "--device=dri",
+        "--talk-name=it.mijorus.smile",
+        "--talk-name=org.gnome.Shell.Extensions"
+    ],
+    "cleanup": [
+        "/include",
+        "/lib/pkgconfig",
+        "/man",
+        "/share/doc",
+        "/share/gtk-doc",
+        "/share/man",
+        "/share/pkgconfig",
+        "*.la",
+        "*.a"
+    ],
+    "modules": [
+        "python3-requirements.json",
+        {
+            "name": "xdotool",
+            "no-autogen": true,
+            "make-args": [
+                "WITHOUT_RPATH_FIX=1"
+            ],
+            "make-install-args": [
+                "PREFIX=${FLATPAK_DEST}"
+            ],
+            "sources": [
+                {
+                    "type": "archive",
+                    "url": "https://github.com/jordansissel/xdotool/archive/v3.20211022.1/xdotool-3.20211022.1.tar.gz",
+                    "sha256": "82b15a944a5e82fee15e0f6116bd9f642bc3d0bb6989fc0ca5ad9dfe35de0847"
+                }
+            ]
+        },
+        {
+            "name": "wl-clipboard",
+            "buildsystem": "meson",
+            "config-opts": [
+                "-Dzshcompletiondir=no",
+                "-Dfishcompletiondir=no"
+            ],
+            "sources": [
+                {
+                    "type": "git",
+                    "url": "https://github.com/bugaevc/wl-clipboard.git",
+                    "tag": "v2.2.1"
+                }
+            ]
+        },
+        {
+            "name": "smile",
+            "builddir": true,
+            "buildsystem": "meson",
+            "sources": [
+                {
+                    "type": "dir",
+                    "path": "./"
+                }
+            ]
+        }
+    ]
+}
