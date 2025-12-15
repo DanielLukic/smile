@@ -1,5 +1,6 @@
 #include <gio/gio.h>
 #include <gtk/gtk.h>
+#include <json-glib/json-glib.h>
 
 #include "emoji_store.h"
 
@@ -10,21 +11,33 @@ extern GResource *emoji_res_get_resource(void);
 #define INITIAL_EMOJI_CHUNK 200
 #define EMOJI_CHUNK_SIZE 150
 #define SCROLL_THRESHOLD_PX 300.0
+#define RECENTS_LIMIT 20
 
 typedef struct {
   GtkApplication *app;
   EmojiStore *store;
   GPtrArray  *current_results;
+  GPtrArray  *recents; /* array of RecentItem* */
   GtkWidget  *flowbox;
   GtkWidget  *status_label;
   GtkWidget  *search_entry;
   GtkWidget  *window;
   guint       loaded_count;
   gint        selected_index;
+  guint64     use_counter;
 } SmileAppState;
+
+typedef struct {
+  SmileEmoji *emoji;
+  char       *hexcode;
+  guint       count;
+  guint64     last_used;
+} RecentItem;
 
 static void populate_flowbox(SmileAppState *state, GPtrArray *items);
 static void emoji_button_clicked(GtkButton *button, gpointer user_data);
+static GPtrArray *build_results_for_query(SmileAppState *state, const char *text);
+static void recents_dump(SmileAppState *state, const char *reason);
 
 static void
 reset_search_and_results(SmileAppState *state)
@@ -34,7 +47,7 @@ reset_search_and_results(SmileAppState *state)
   }
 
   gtk_entry_set_text(GTK_ENTRY(state->search_entry), "");
-  GPtrArray *all = emoji_store_get_all(state->store);
+  GPtrArray *all = build_results_for_query(state, "");
   populate_flowbox(state, all);
 }
 
@@ -109,6 +122,31 @@ create_emoji_button(SmileAppState *state, SmileEmoji *entry)
   return button;
 }
 
+static void
+recent_item_free(RecentItem *item)
+{
+  if (!item) {
+    return;
+  }
+  g_clear_pointer(&item->hexcode, g_free);
+  g_free(item);
+}
+
+static SmileEmoji *
+find_emoji_by_hexcode(const EmojiStore *store, const char *hexcode)
+{
+  if (!store || !hexcode) {
+    return NULL;
+  }
+  for (guint i = 0; i < store->all->len; i++) {
+    SmileEmoji *e = g_ptr_array_index(store->all, i);
+    if (g_strcmp0(e->hexcode, hexcode) == 0) {
+      return e;
+    }
+  }
+  return NULL;
+}
+
 static gint
 calculate_columns(SmileAppState *state)
 {
@@ -170,6 +208,171 @@ ensure_loaded_up_to(SmileAppState *state, guint min_count)
   return added;
 }
 
+static char *
+recents_path(void)
+{
+  const char *data_dir = g_get_user_data_dir();
+  return g_build_filename(data_dir, "smile", "recents.json", NULL);
+}
+
+static void
+recents_save(SmileAppState *state)
+{
+  if (!state || !state->recents) {
+    return;
+  }
+
+  g_autofree char *path = recents_path();
+  g_autofree char *dir = g_path_get_dirname(path);
+  g_mkdir_with_parents(dir, 0700);
+
+   g_print("Smile: saving recents to %s (items: %u)\n", path, state->recents->len);
+   recents_dump(state, "save");
+
+  JsonBuilder *b = json_builder_new();
+  json_builder_begin_array(b);
+  for (guint i = 0; i < state->recents->len; i++) {
+    RecentItem *item = g_ptr_array_index(state->recents, i);
+    if (!item || !item->hexcode) {
+      continue;
+    }
+    json_builder_begin_object(b);
+    json_builder_set_member_name(b, "hexcode");
+    json_builder_add_string_value(b, item->hexcode);
+    json_builder_set_member_name(b, "count");
+    json_builder_add_int_value(b, item->count);
+    json_builder_set_member_name(b, "last_used");
+    json_builder_add_int_value(b, (gint64) item->last_used);
+    json_builder_end_object(b);
+  }
+  json_builder_end_array(b);
+
+  g_autoptr(JsonGenerator) gen = json_generator_new();
+  JsonNode *root = json_builder_get_root(b);
+  json_generator_set_root(gen, root);
+  json_generator_to_file(gen, path, NULL);
+  json_node_free(root);
+  g_object_unref(b);
+}
+
+static void
+recents_load(SmileAppState *state)
+{
+  g_return_if_fail(state);
+
+  if (state->recents) {
+    g_ptr_array_free(state->recents, TRUE);
+  }
+  state->recents = g_ptr_array_new_with_free_func((GDestroyNotify) recent_item_free);
+
+  g_autofree char *path = recents_path();
+  if (!g_file_test(path, G_FILE_TEST_EXISTS)) {
+    g_print("Smile: recents file not found (%s), starting fresh\n", path);
+    return;
+  }
+
+  g_autoptr(JsonParser) parser = json_parser_new();
+  if (!json_parser_load_from_file(parser, path, NULL)) {
+    g_print("Smile: failed to load recents file %s\n", path);
+    return;
+  }
+  g_print("Smile: loaded recents from %s\n", path);
+
+  JsonNode *root = json_parser_get_root(parser);
+  if (!JSON_NODE_HOLDS_ARRAY(root)) {
+    return;
+  }
+
+  JsonArray *arr = json_node_get_array(root);
+  guint len = json_array_get_length(arr);
+  for (guint i = 0; i < len; i++) {
+    JsonObject *obj = json_array_get_object_element(arr, i);
+    if (!obj) {
+      continue;
+    }
+    if (!json_object_has_member(obj, "hexcode")) {
+      continue;
+    }
+    const char *hex = json_object_get_string_member(obj, "hexcode");
+    guint count = 0;
+    guint64 last_used = 0;
+    if (json_object_has_member(obj, "count")) {
+      count = (guint) json_object_get_int_member(obj, "count");
+    }
+    if (json_object_has_member(obj, "last_used")) {
+      last_used = (guint64) json_object_get_int_member(obj, "last_used");
+    }
+    RecentItem *item = g_new0(RecentItem, 1);
+    item->hexcode = g_strdup(hex);
+    item->emoji = find_emoji_by_hexcode(state->store, hex);
+    item->count = count;
+    item->last_used = last_used;
+    g_ptr_array_add(state->recents, item);
+    if (item->last_used > state->use_counter) {
+      state->use_counter = item->last_used;
+    }
+  }
+  /* Trim to RECENTS_LIMIT; keep file order (already most recent first). */
+  while (state->recents->len > RECENTS_LIMIT) {
+    g_ptr_array_remove_index(state->recents, state->recents->len - 1);
+  }
+  recents_dump(state, "after load");
+}
+
+static void
+recents_record_use(SmileAppState *state, SmileEmoji *emoji)
+{
+  if (!state || !emoji || !emoji->hexcode) {
+    return;
+  }
+  if (!state->recents) {
+    state->recents = g_ptr_array_new_with_free_func((GDestroyNotify) recent_item_free);
+  }
+
+  /* Remove existing entry if present. */
+  for (guint i = 0; i < state->recents->len; i++) {
+    RecentItem *item = g_ptr_array_index(state->recents, i);
+    if (g_strcmp0(item->hexcode, emoji->hexcode) == 0) {
+      g_ptr_array_remove_index(state->recents, i);
+      break;
+    }
+  }
+
+  /* Evict oldest if at limit. */
+  if (state->recents->len >= RECENTS_LIMIT) {
+    g_ptr_array_remove_index(state->recents, state->recents->len - 1);
+  }
+
+  RecentItem *item = g_new0(RecentItem, 1);
+  item->hexcode = g_strdup(emoji->hexcode);
+  item->emoji = emoji;
+  item->count = 1;
+  item->last_used = ++state->use_counter;
+  /* Prepend to keep most recent first without needing to sort. */
+  g_ptr_array_insert(state->recents, 0, item);
+
+  recents_dump(state, "after record_use");
+  recents_save(state);
+}
+
+static void
+recents_dump(SmileAppState *state, const char *reason)
+{
+  if (!state || !state->recents) {
+    return;
+  }
+  g_print("Smile: recents (%s)\n", reason ? reason : "");
+  for (guint i = 0; i < state->recents->len; i++) {
+    RecentItem *item = g_ptr_array_index(state->recents, i);
+    const char *hex = item && item->hexcode ? item->hexcode : "(null)";
+    const char *emo = (item && item->emoji && item->emoji->emoji) ? item->emoji->emoji : "?";
+    g_print("  %u %s (%s) count=%u last=%" G_GUINT64_FORMAT "\n",
+            i, emo, hex,
+            item ? item->count : 0,
+            item ? item->last_used : 0);
+  }
+}
+
 static void
 on_adjustment_value_changed(GtkAdjustment *adj, gpointer user_data)
 {
@@ -181,6 +384,63 @@ on_adjustment_value_changed(GtkAdjustment *adj, gpointer user_data)
   if (value + page + SCROLL_THRESHOLD_PX >= upper) {
     ensure_loaded_up_to(state, state->loaded_count + EMOJI_CHUNK_SIZE);
   }
+}
+
+static GPtrArray *
+build_results_for_query(SmileAppState *state, const char *text)
+{
+  if (!text || !*text) {
+    GPtrArray *combined = g_ptr_array_new();
+    if (state->recents) {
+      for (guint i = 0; i < state->recents->len; i++) {
+        RecentItem *item = g_ptr_array_index(state->recents, i);
+        if (item->emoji) {
+          g_ptr_array_add(combined, item->emoji);
+        }
+      }
+    }
+    GPtrArray *all = emoji_store_get_all(state->store);
+    for (guint i = 0; i < all->len; i++) {
+      g_ptr_array_add(combined, g_ptr_array_index(all, i));
+    }
+    g_ptr_array_unref(all);
+    return combined;
+  }
+
+  GPtrArray *results = emoji_store_filter(state->store, text);
+  if (!state->recents || state->recents->len == 0) {
+    return results;
+  }
+
+  /* Promote matching recents to the front, keep filter order for the rest. */
+  GPtrArray *reordered = g_ptr_array_new();
+  GHashTable *seen = g_hash_table_new(g_direct_hash, g_direct_equal);
+
+  for (guint i = 0; i < state->recents->len; i++) {
+    RecentItem *item = g_ptr_array_index(state->recents, i);
+    if (!item || !item->emoji) {
+      continue;
+    }
+    for (guint j = 0; j < results->len; j++) {
+      SmileEmoji *res = g_ptr_array_index(results, j);
+      if (res == item->emoji) {
+        g_ptr_array_add(reordered, res);
+        g_hash_table_insert(seen, res, res);
+        break;
+      }
+    }
+  }
+
+  for (guint j = 0; j < results->len; j++) {
+    SmileEmoji *res = g_ptr_array_index(results, j);
+    if (!g_hash_table_contains(seen, res)) {
+      g_ptr_array_add(reordered, res);
+    }
+  }
+
+  g_hash_table_unref(seen);
+  g_ptr_array_unref(results);
+  return reordered;
 }
 
 static void
@@ -222,6 +482,10 @@ smile_app_state_free(SmileAppState *state)
 
   if (state->current_results) {
     g_ptr_array_unref(state->current_results);
+  }
+
+  if (state->recents) {
+    g_ptr_array_free(state->recents, TRUE);
   }
 
   emoji_store_free(state->store);
@@ -267,6 +531,8 @@ smile_app_state_get(GtkApplication *app, GError **error)
     g_free(state);
     return NULL;
   }
+  state->use_counter = 0;
+  recents_load(state);
 
   g_object_set_data_full(G_OBJECT(app), "smile-app-state", state, (GDestroyNotify) smile_app_state_free);
   return state;
@@ -308,6 +574,8 @@ copy_and_close(SmileAppState *state, SmileEmoji *entry)
   gtk_clipboard_set_text(primary, entry->emoji, -1);
   g_print("Smile: copied emoji '%s' to PRIMARY\n",
           entry->emoji ? entry->emoji : "(null)");
+
+  recents_record_use(state, entry);
 
   /* Keep the app running; just hide the window now. */
   GtkWindow *window = gtk_application_get_active_window(state->app);
@@ -354,7 +622,7 @@ populate_flowbox(SmileAppState *state, GPtrArray *items)
   state->selected_index = -1;
 
   /* Show initial chunk; more are lazily added on scroll / navigation. */
-  ensure_loaded_up_to(state, 200);
+  ensure_loaded_up_to(state, INITIAL_EMOJI_CHUNK);
 
   if (items->len == 0) {
     gtk_label_set_text(GTK_LABEL(state->status_label), "No matches found");
@@ -375,7 +643,7 @@ search_entry_changed(GtkSearchEntry *entry, gpointer user_data)
   SmileAppState *state = user_data;
   const char *text = gtk_entry_get_text(GTK_ENTRY(entry));
 
-  GPtrArray *results = emoji_store_filter(state->store, text);
+  GPtrArray *results = build_results_for_query(state, text);
   populate_flowbox(state, results);
 }
 
@@ -536,8 +804,8 @@ build_content(SmileAppState *state)
   state->flowbox = flowbox;
   state->status_label = status;
 
-  GPtrArray *all_entries = emoji_store_get_all(state->store);
-  populate_flowbox(state, all_entries);
+  GPtrArray *initial = build_results_for_query(state, "");
+  populate_flowbox(state, initial);
 
   return root;
 }
@@ -554,6 +822,8 @@ on_app_activate(GtkApplication *app, gpointer user_data)
     g_clear_error(&error);
     return;
   }
+  g_print("Smile: recents file path %s\n", recents_path());
+  recents_save(state);
 
   if (state->window) {
     gtk_widget_show(state->window);
