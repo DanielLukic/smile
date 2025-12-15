@@ -7,6 +7,9 @@ extern GResource *emoji_res_get_resource(void);
 
 #define DEFAULT_EMOJI_DATA_PATH "data/emoji.json"
 #define EMBEDDED_EMOJI_RESOURCE "/it/mijorus/smile/emoji.json"
+#define INITIAL_EMOJI_CHUNK 200
+#define EMOJI_CHUNK_SIZE 150
+#define SCROLL_THRESHOLD_PX 300.0
 
 typedef struct {
   GtkApplication *app;
@@ -16,10 +19,12 @@ typedef struct {
   GtkWidget  *status_label;
   GtkWidget  *search_entry;
   GtkWidget  *window;
+  guint       loaded_count;
   gint        selected_index;
 } SmileAppState;
 
 static void populate_flowbox(SmileAppState *state, GPtrArray *items);
+static void emoji_button_clicked(GtkButton *button, gpointer user_data);
 
 static void
 reset_search_and_results(SmileAppState *state)
@@ -29,12 +34,8 @@ reset_search_and_results(SmileAppState *state)
   }
 
   gtk_entry_set_text(GTK_ENTRY(state->search_entry), "");
-  if (state->current_results) {
-    g_ptr_array_unref(state->current_results);
-  }
-  state->current_results = emoji_store_get_all(state->store);
-  populate_flowbox(state, g_ptr_array_ref(state->current_results));
-  state->selected_index = -1;
+  GPtrArray *all = emoji_store_get_all(state->store);
+  populate_flowbox(state, all);
 }
 
 static void
@@ -89,6 +90,25 @@ set_button_selected(GtkWidget *button, gboolean selected)
   }
 }
 
+static GtkWidget *
+create_emoji_button(SmileAppState *state, SmileEmoji *entry)
+{
+  GtkWidget *button = gtk_button_new_with_label(entry->emoji);
+  gtk_widget_set_hexpand(button, FALSE);
+  gtk_widget_set_vexpand(button, FALSE);
+  gtk_widget_set_halign(button, GTK_ALIGN_CENTER);
+  gtk_widget_set_valign(button, GTK_ALIGN_CENTER);
+  gtk_widget_set_size_request(button, 40, 40);
+  gtk_widget_set_margin_start(button, 1);
+  gtk_widget_set_margin_end(button, 1);
+  gtk_widget_set_margin_top(button, 1);
+  gtk_widget_set_margin_bottom(button, 1);
+
+  g_object_set_data(G_OBJECT(button), "emoji-entry", entry);
+  g_signal_connect(button, "clicked", G_CALLBACK(emoji_button_clicked), state);
+  return button;
+}
+
 static gint
 calculate_columns(SmileAppState *state)
 {
@@ -100,7 +120,8 @@ calculate_columns(SmileAppState *state)
   gint columns = 0;
   gint base_y = -1;
 
-  for (guint i = 0; i < state->current_results->len; i++) {
+  guint max_check = MIN(state->loaded_count, state->current_results->len);
+  for (guint i = 0; i < max_check; i++) {
     GtkFlowBoxChild *child = gtk_flow_box_get_child_at_index(box, i);
     if (!child) {
       break;
@@ -126,6 +147,42 @@ calculate_columns(SmileAppState *state)
   return columns;
 }
 
+static gboolean
+ensure_loaded_up_to(SmileAppState *state, guint min_count)
+{
+  if (!state->current_results) {
+    return FALSE;
+  }
+
+  GtkContainer *container = GTK_CONTAINER(state->flowbox);
+  gboolean added = FALSE;
+
+  guint target = MIN(min_count, state->current_results->len);
+  for (guint i = state->loaded_count; i < target; i++) {
+    SmileEmoji *entry = g_ptr_array_index(state->current_results, i);
+    GtkWidget *button = create_emoji_button(state, entry);
+    gtk_container_add(container, button);
+    gtk_widget_show(button);
+    state->loaded_count += 1;
+    added = TRUE;
+  }
+
+  return added;
+}
+
+static void
+on_adjustment_value_changed(GtkAdjustment *adj, gpointer user_data)
+{
+  SmileAppState *state = user_data;
+  gdouble value = gtk_adjustment_get_value(adj);
+  gdouble upper = gtk_adjustment_get_upper(adj);
+  gdouble page = gtk_adjustment_get_page_size(adj);
+
+  if (value + page + SCROLL_THRESHOLD_PX >= upper) {
+    ensure_loaded_up_to(state, state->loaded_count + EMOJI_CHUNK_SIZE);
+  }
+}
+
 static void
 update_selection(SmileAppState *state, gint new_index)
 {
@@ -145,6 +202,10 @@ update_selection(SmileAppState *state, gint new_index)
   if (state->selected_index >= 0 && (guint) state->selected_index < len) {
     GtkWidget *prev = get_button_for_index(state, state->selected_index);
     set_button_selected(prev, FALSE);
+  }
+
+  if ((guint) new_index >= state->loaded_count) {
+    ensure_loaded_up_to(state, (guint) new_index + 1);
   }
 
   GtkWidget *button = get_button_for_index(state, new_index);
@@ -289,26 +350,11 @@ populate_flowbox(SmileAppState *state, GPtrArray *items)
     g_ptr_array_unref(state->current_results);
   }
   state->current_results = items;
+  state->loaded_count = 0;
   state->selected_index = -1;
 
-  for (guint i = 0; i < items->len; i++) {
-    SmileEmoji *entry = g_ptr_array_index(items, i);
-    GtkWidget *button = gtk_button_new_with_label(entry->emoji);
-    gtk_widget_set_hexpand(button, FALSE);
-    gtk_widget_set_vexpand(button, FALSE);
-    gtk_widget_set_halign(button, GTK_ALIGN_CENTER);
-    gtk_widget_set_valign(button, GTK_ALIGN_CENTER);
-    gtk_widget_set_size_request(button, 40, 40);
-    gtk_widget_set_margin_start(button, 1);
-    gtk_widget_set_margin_end(button, 1);
-    gtk_widget_set_margin_top(button, 1);
-    gtk_widget_set_margin_bottom(button, 1);
-
-    g_object_set_data(G_OBJECT(button), "emoji-entry", entry);
-    g_signal_connect(button, "clicked", G_CALLBACK(emoji_button_clicked), state);
-
-    gtk_container_add(container, button);
-  }
+  /* Show initial chunk; more are lazily added on scroll / navigation. */
+  ensure_loaded_up_to(state, 200);
 
   if (items->len == 0) {
     gtk_label_set_text(GTK_LABEL(state->status_label), "No matches found");
@@ -479,6 +525,8 @@ build_content(SmileAppState *state)
   gtk_widget_set_vexpand(flowbox, FALSE);
   gtk_widget_set_valign(flowbox, GTK_ALIGN_START);
   gtk_container_add(GTK_CONTAINER(scrolled), flowbox);
+  GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(scrolled));
+  g_signal_connect(vadj, "value-changed", G_CALLBACK(on_adjustment_value_changed), state);
 
   GtkWidget *status = gtk_label_new(NULL);
   gtk_label_set_xalign(GTK_LABEL(status), 0.5);
