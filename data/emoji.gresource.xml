@@ -3,5 +3,6 @@
 <gresources>
   <gresource prefix="/it/mijorus/smile">
     <file>emoji.json</file>
+    <file>symbols.json</file>
   </gresource>
 </gresources>

@@ -17,7 +17,9 @@ typedef struct {
 
 EmojiStore *emoji_store_new(const char *json_path, GError **error);
 EmojiStore *emoji_store_new_from_resource(const char *resource_path, GError **error);
+gboolean    emoji_store_append_from_resource(EmojiStore *store, const char *resource_path, GError **error);
 void        emoji_store_free(EmojiStore *store);
 
 GPtrArray *emoji_store_get_all(const EmojiStore *store);
 GPtrArray *emoji_store_filter(const EmojiStore *store, const char *query);
+gint       emoji_store_score_entry(const SmileEmoji *entry, const char *query);

@@ -140,6 +140,46 @@ emoji_store_new_from_resource(const char *resource_path, GError **error)
   return emoji_store_from_parser(parser, error);
 }
 
+gboolean
+emoji_store_append_from_resource(EmojiStore *store, const char *resource_path, GError **error)
+{
+  g_return_val_if_fail(store != NULL, FALSE);
+  g_return_val_if_fail(resource_path != NULL, FALSE);
+
+  g_autoptr(GBytes) bytes = g_resources_lookup_data(resource_path, G_RESOURCE_LOOKUP_FLAGS_NONE, error);
+  if (!bytes) {
+    return FALSE;
+  }
+
+  gsize length = 0;
+  const gchar *data = g_bytes_get_data(bytes, &length);
+
+  g_autoptr(JsonParser) parser = json_parser_new();
+  if (!json_parser_load_from_data(parser, data, length, error)) {
+    return FALSE;
+  }
+
+  JsonNode *root = json_parser_get_root(parser);
+  if (!JSON_NODE_HOLDS_ARRAY(root)) {
+    g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_INVAL, "Symbols data root is not an array");
+    return FALSE;
+  }
+
+  JsonArray *array = json_node_get_array(root);
+  guint len = json_array_get_length(array);
+
+  for (guint i = 0; i < len; i++) {
+    JsonObject *obj = json_array_get_object_element(array, i);
+    if (!obj) {
+      continue;
+    }
+    SmileEmoji *entry = emoji_entry_from_json(obj);
+    g_ptr_array_add(store->all, entry);
+  }
+
+  return TRUE;
+}
+
 void
 emoji_store_free(EmojiStore *store)
 {

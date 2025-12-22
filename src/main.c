@@ -498,6 +498,10 @@ load_emoji_store(GError **error)
   GError *local_error = NULL;
   EmojiStore *store = emoji_store_new_from_resource(EMBEDDED_EMOJI_RESOURCE, &local_error);
   if (store) {
+    if (!emoji_store_append_from_resource(store, "/it/mijorus/smile/symbols.json", &local_error)) {
+      g_printerr("Warning: failed to load symbols: %s\n", local_error ? local_error->message : "unknown");
+      g_clear_error(&local_error);
+    }
     return store;
   }
   g_clear_error(&local_error);
@@ -506,12 +510,23 @@ load_emoji_store(GError **error)
   if (override && *override) {
     store = emoji_store_new(override, &local_error);
     if (store) {
+      if (!emoji_store_append_from_resource(store, "/it/mijorus/smile/symbols.json", &local_error)) {
+        g_printerr("Warning: failed to load symbols: %s\n", local_error ? local_error->message : "unknown");
+        g_clear_error(&local_error);
+      }
       return store;
     }
     g_clear_error(&local_error);
   }
 
-  return emoji_store_new(DEFAULT_EMOJI_DATA_PATH, error);
+  store = emoji_store_new(DEFAULT_EMOJI_DATA_PATH, error);
+  if (store) {
+    if (!emoji_store_append_from_resource(store, "/it/mijorus/smile/symbols.json", &local_error)) {
+      g_printerr("Warning: failed to load symbols: %s\n", local_error ? local_error->message : "unknown");
+      g_clear_error(&local_error);
+    }
+  }
+  return store;
 }
 
 static SmileAppState *
