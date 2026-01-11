@@ -11,7 +11,7 @@ extern GResource *emoji_res_get_resource(void);
 #define INITIAL_EMOJI_CHUNK 200
 #define EMOJI_CHUNK_SIZE 150
 #define SCROLL_THRESHOLD_PX 300.0
-#define RECENTS_LIMIT 20
+#define RECENTS_LIMIT 1024
 
 typedef struct {
   GtkApplication *app;
@@ -361,16 +361,14 @@ recents_dump(SmileAppState *state, const char *reason)
   if (!state || !state->recents) {
     return;
   }
-  g_print("Smile: recents (%s)\n", reason ? reason : "");
-  for (guint i = 0; i < state->recents->len; i++) {
+  guint limit = MIN((guint)10, state->recents->len);
+  g_print("Smile: recents (%s) showing %u/%u: ", reason ? reason : "", limit, state->recents->len);
+  for (guint i = 0; i < limit; i++) {
     RecentItem *item = g_ptr_array_index(state->recents, i);
-    const char *hex = item && item->hexcode ? item->hexcode : "(null)";
     const char *emo = (item && item->emoji && item->emoji->emoji) ? item->emoji->emoji : "?";
-    g_print("  %u %s (%s) count=%u last=%" G_GUINT64_FORMAT "\n",
-            i, emo, hex,
-            item ? item->count : 0,
-            item ? item->last_used : 0);
+    g_print("%s%s", emo, (i + 1 < limit) ? " " : "");
   }
+  g_print("\n");
 }
 
 static void
